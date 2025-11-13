@@ -58,17 +58,18 @@ end
 
 %% ===== RUN =====
 function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>   
+
 % Create a new event that occurs at 1 second for all channels
-eventTime = 1; % Time in seconds
 eventName = sProcess.options.eventname.Value; % Get the event name from options
+eventTime = 1; % Time in seconds
 
 % Create the event structure
-newEvent = struct();
-newEvent.label = eventName; % Set the event label
-newEvent.time = eventTime; % Set the event time
-
-% Initialize the output files
-OutputFiles = [];
+newEvent = db_template('event');
+newEvent.label    = eventName;
+newEvent.times    = eventTime; % Set the event time to 1 second
+newEvent.epochs   = 1; % Set epochs to 1 for the single event
+newEvent.channels = []; % Initialize channels as empty
+newEvent.notes    = []; % Initialize notes as empty
 
 % Add the new event to the output
 i = 1; % Initialize index for OutputFiles
@@ -78,12 +79,12 @@ OutputFiles(i).event = newEvent; % Assign the new event to each channel
 if ~isfield(OutputFiles, 'FileName')
     OutputFiles(i).FileName = ''; % Assign an empty string if FileName is not present
 end
+
 % Save the new event in the events structure
 if ~isfield(OutputFiles, 'events')
     OutputFiles(i).events = []; % Initialize events field if it doesn't exist
 end
 
 % Append the new event to the events field
-OutputFiles(i).events = [OutputFiles(i).events; newEvent];
+OutputFiles(i).events = [OutputFiles(i).events; newEvent]; % Correctly append the new event
 end
-
