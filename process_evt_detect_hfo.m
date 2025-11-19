@@ -59,32 +59,46 @@ end
 %% ===== RUN =====
 function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>   
 
+
+
+% Initialize the output files
+OutputFiles = {};
+
+for iFile = 1:length(sInputs)
+% Load the raw file descriptor
+isRaw = strcmpi(sInputs(iFile).FileType, 'raw');
+
+if isRaw
+    DataMat = in_bst_data(sInputs(iFile).FileName, 'F', 'events');
+    sFile = DataMat.F;
+else
+    DataMat = in_bst_data(sInputs(iFile).FileName, 'Time');
+    sFile = in_fopen(sInputs(iFile).FileName, 'BST-DATA');
+end
+end
+
 % Create a new event that occurs at 1 second for all channels
-eventName = sProcess.options.eventname.Value; % Get the event name from options
-eventTime = 1; % Time in seconds
+
+% Basic events structure
+if ~isfield(sFile, 'events') || isempty(sFile.events)
+       sFile1.events = repmat(db_template('event'), 0);
+end
+iEvt=1;
+sEvent = sFile.events(iEvt);
 
 % Create the event structure
-newEvent = db_template('event');
-newEvent.label    = eventName;
-newEvent.times    = eventTime; % Set the event time to 1 second
-newEvent.epochs   = 1; % Set epochs to 1 for the single event
-newEvent.channels = []; % Initialize channels as empty
-newEvent.notes    = []; % Initialize notes as empty
+sEvent.label = sProcess.options.eventname.Value; % Get the event name from options; % Set the event label
+sEvent.color = [1 0 0];
+% sEvent.epochs = []; % Initialize epochs field
+sEvent.times = [1.570156250000000e+02,5.059414062500000e+02,8.775820312500000e+02,1.125125000000000e+03,1.555351562500000e+03]; % Set the event time
+% sEvent.reactTimes = []; % Initialize reactTimes field
+% sEvent.select = []; % Initialize select field
+% sEvent.channels = []; % Specify channels if needed, empty for all channels
+sEvent.notes = []; % Initialize notes field
 
-% Add the new event to the output
-i = 1; % Initialize index for OutputFiles
-OutputFiles(i).event = newEvent; % Assign the new event to each channel
-
-% Ensure that the output files have a filename field
-if ~isfield(OutputFiles, 'FileName')
-    OutputFiles(i).FileName = ''; % Assign an empty string if FileName is not present
-end
-
-% Save the new event in the events structure
-if ~isfield(OutputFiles, 'events')
-    OutputFiles(i).events = []; % Initialize events field if it doesn't exist
-end
 
 % Append the new event to the events field
-OutputFiles(i).events = [OutputFiles(i).events; newEvent]; % Correctly append the new event
+sFile.events(end+1) = sEvent;
+OutputFiles{end+1} = sFile; % Append the updated file to the output
+
 end
