@@ -19,7 +19,7 @@ function varargout = process_evt_detect_hfo( varargin )
 % For more information type "brainstorm license" at command prompt.
 % =============================================================================@
 %
-% Authors: Francois Tadel, Elizabeth Bock, 2011-2016
+% Authors: Daniel Martin, Guiomar Niso, 2025
 
 % Ensure that the output argument is assigned a value
 eval(macro_method);
