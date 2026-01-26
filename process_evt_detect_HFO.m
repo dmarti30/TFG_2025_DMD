@@ -34,16 +34,22 @@ function sProcess = GetDescription() %#ok<DEFNU>
     sProcess.Category    = 'Custom';
     sProcess.SubGroup    = 'HFO detection';
     sProcess.Index       = 55;
+
+    % Definition of the input accepted by this process
     sProcess.InputTypes  = {'data'};
     sProcess.OutputTypes = {'data'};
     sProcess.nInputs     = 1;
     sProcess.nMinFiles   = 1;
-    sProcess.isSeparator = 0;
     
-    % Configurable parameters, example:
-    sProcess.options.Fs.Comment = 'Sampling frequency (Hz)';
-    sProcess.options.Fs.Type    = 'value';
-    sProcess.options.Fs.Value   = 512; % Default value
+    % Channel name
+    sProcess.options.channelname.Comment = 'Channel name:';
+    sProcess.options.channelname.Type    = 'channelname';
+    sProcess.options.channelname.Value   = ''; 
+
+    % Event name
+    sProcess.options.eventname.Comment = 'Event name:';
+    sProcess.options.eventname.Type    = 'text';
+    sProcess.options.eventname.Value   = 'HFO';
 end
 
 %% ===== FORMAT COMMENT =====
@@ -166,3 +172,4 @@ function OutputFiles = Run(sProcess, sInputs)
     
     OutputFiles = {OutputFile};
 end
+
