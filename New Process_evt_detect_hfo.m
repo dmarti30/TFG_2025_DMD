@@ -57,60 +57,93 @@ end
 
 
 %% ===== RUN =====
-function OutputFiles = Run(sProcess, sInputs)    
+function OutputFiles = Run(sProcess, sInputs)
 
-% Initialize the output files
-OutputFiles = {};
+    OutputFiles = cell(1, numel(sInputs));
+    evtName = sProcess.options.eventname.Value;
 
-for iFile = 1:length(sInputs)
-    % Load the raw file descriptor
-    isRaw = strcmpi(sInputs(iFile).FileType, 'raw');
+    for f = 1:numel(sInputs)
 
-    if isRaw
-        DataMat = in_bst_data(sInputs(iFile).FileName, 'F', 'events');
-        sFile = DataMat.F;
-    else
-        DataMat = in_bst_data(sInputs(iFile).FileName, 'Time');
-        sFile = in_fopen(sInputs(iFile).FileName, 'BST-DATA');
-    end
+        %% === LOAD TIMEFREQ (MORLET) ===
+        tfMat = in_bst(sInputs(f).FileName);
+        TF   = tfMat.TF;              % [channels x freq x time]
+        time = tfMat.Time(:)';        % time vector
 
-    % Create a new event that occurs at 1 second for all channels
-    % Basic events structure
-    sEvent = repmat(db_template('event'), 0);
-    iEvt =1;
+        %% === LOAD ASSOCIATED DATA (SPIKE EPOCH) ===
+        dataMat = in_bst(tfMat.DataFile);
+        F = dataMat.F;                % [channels x samples]
+        time = dataMat.Time(:)';      % overwrite with data time
+        Fs = 1 / mean(diff(time));
 
-    % Create the event structure
-    sEvent(iEvt).label = sProcess.options.eventname.Value; % Get the event name from options
-    sEvent(iEvt).color = [1 0 0];
-    sEvent(iEvt).epochs = []; % Initialize epochs field
-    sEvent(iEvt).times = [1.570156250000000e+02]; % Set the event time
-    sEvent(iEvt).reactTimes = []; % Initialize reactTimes field
-    sEvent(iEvt).select = []; % Initialize select field
-    sEvent(iEvt).channels = []; % Specify channels if needed, empty for all channels
-    sEvent(iEvt).notes = []; % Initialize notes field
+        nChannels = size(F,1);
+        nSamples  = size(F,2);
 
-    % Append the new event to the events field
-    sFile.events(end+1) = sEvent;
+        %% === INIT MATRICES (LIKE TFG SCRIPT) ===
+        EoI = zeros(nChannels, nSamples);
+        HFO = zeros(nChannels, nSamples);
 
-     % Only save changes if something was detected
-        if ~isempty(sEvent)
-            % Report changes in .mat structure
-            if isRaw
-                DataMat.F = sFile;
-            else
-                DataMat.Events = sFile.events;
-            end
-            % Save file definition
-            bst_save(file_fullpath(sInputs(iFile).FileName), DataMat, 'v6', 1);
-            % Report number of detected events
-            nEvents =1;
-            bst_report('Info', sProcess, sInputs(iFile), sprintf('%d events detected in HFO', nEvents));
-        else
-            bst_report('Warning', sProcess, sInputs(iFile), ['No event detected. Please check the signal quality.']);
+        %% === BLOCK 2: DETERMINE EoI ===
+        for ch = 1:nChannels
+            EoI(ch,:) = determineEoI(F(ch,:), time);
         end
-        
-        OutputFiles = {sInputs.FileName};
 
-end
-end
+        %% === BLOCK 3: DETERMINE HFO FROM EoI ===
+        for ch = 1:nChannels
+            time_frequency_map = squeeze(TF(ch,:,:));   % [freq x time]
+            HFOrow = zeros(1, nSamples);
+            HFOrow = determineHFOfromEoI(F(ch,:), EoI(ch,:), Fs, time, HFOrow, time_frequency_map);
+            HFO(ch,:) = HFOrow;
+        end
 
+        %% === BLOCK 4: COMPUTE GFP & SPIKE REGION ===
+        [~, minimum_index, ~, min_after_spike] = computeGFPandSpikeRegion(F, time);
+
+        %% === DETERMINE HFO WITHIN SPIKE REGION & CREATE EVENTS ===
+        detTimes = [];
+        detCh    = [];
+
+        for ch = 1:nChannels
+            [~, yes_HFO, start_HFO, end_HFO] = ...
+                determineHFOinSpikeRegion(HFO(ch,:), time, minimum_index, min_after_spike);
+
+            if yes_HFO == 1 && start_HFO ~= 0 && end_HFO ~= 0
+                detTimes(end+1,:) = [start_HFO, end_HFO]; %#ok<AGROW>
+                detCh(end+1)      = ch;                  %#ok<AGROW>
+            end
+        end
+
+        %% === ADD EVENTS TO DATA ===
+        if ~isempty(detTimes)
+
+            if ~isfield(dataMat, 'Events') || isempty(dataMat.Events)
+                dataMat.Events = struct([]);
+            end
+
+            evtIdx = [];
+            for k = 1:numel(dataMat.Events)
+                if strcmp(dataMat.Events(k).label, evtName)
+                    evtIdx = k;
+                end
+            end
+
+            if isempty(evtIdx)
+                evtIdx = numel(dataMat.Events) + 1;
+                dataMat.Events(evtIdx).label    = evtName;
+                dataMat.Events(evtIdx).epochs   = [];
+                dataMat.Events(evtIdx).times    = [];
+                dataMat.Events(evtIdx).samples  = [];
+                dataMat.Events(evtIdx).channels = [];
+                dataMat.Events(evtIdx).select   = 1;
+            end
+
+            dataMat.Events(evtIdx).epochs   = [dataMat.Events(evtIdx).epochs, ones(1,size(detTimes,1))];
+            dataMat.Events(evtIdx).times    = [dataMat.Events(evtIdx).times, detTimes'];
+            dataMat.Events(evtIdx).samples  = [dataMat.Events(evtIdx).samples, round(detTimes' * Fs)];
+            dataMat.Events(evtIdx).channels = [dataMat.Events(evtIdx).channels, detCh];
+
+            bst_save(file_fullpath(tfMat.DataFile), dataMat, 'v6');
+        end
+
+        OutputFiles{f} = sInputs(f).FileName;
+    end
+end
