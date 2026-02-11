@@ -1,5 +1,5 @@
 function varargout = process_evt_detect_HFO(varargin)
-% PROCESS_EVT_DETECT_HFO: Detect High frequency oscillations in a continuous file, and create set of events called "HFO"
+% PROCESS_EVT_DETECT_HFO: Detect High frequency oscillations in spike epochs and create events.
 
 % @=============================================================================
 % This function is part of the Brainstorm software:
@@ -22,14 +22,13 @@ function varargout = process_evt_detect_HFO(varargin)
 % Authors: Daniel Martin, Guiomar Niso, 2025
 
 % Ensure that the output argument is assigned a value
-
-eval(macro_method);
+    eval(macro_method);
 end
 
 
 %% ===== GET DESCRIPTION =====
 function sProcess = GetDescription() %#ok<DEFNU>
-    sProcess.Comment     = 'Detect HFO in Spikes (within spike region)';
+    sProcess.Comment     = 'Detect HFO in spikes (spike region)';
     sProcess.Category    = 'Custom';
     sProcess.SubGroup    = 'Events';
     sProcess.Index       = 561;
@@ -41,7 +40,7 @@ function sProcess = GetDescription() %#ok<DEFNU>
 
     sProcess.options.eventname.Comment = 'Event name:';
     sProcess.options.eventname.Type    = 'text';
-    sProcess.options.eventname.Value   = 'HFO_inSpikeRegion';
+    sProcess.options.eventname.Value   = 'HFO';
 end
 
 
@@ -54,95 +53,139 @@ end
 %% ===== RUN =====
 function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
     OutputFiles = cell(1, numel(sInputs));
-    evtName = sProcess.options.eventname.Value;
+    evtName = strtrim(sProcess.options.eventname.Value);
+    if isempty(evtName)
+        evtName = 'HFO';
+    end
 
-    for f = 1:numel(sInputs)
+    % Keep original MATLAB detection functions unchanged: just make sure they are available.
+    addCoreFunctionsToPath();
 
-        % ===== Load timefreq (Morlet) =====
-        tfMat = in_bst(sInputs(f).FileName);
-        morletTF = tfMat.TF;             % expected: [nChannels x nFreq x nTime]
-        time = tfMat.Time(:)';           % seconds
-        Fs = 1 / mean(diff(time));
-
-        % ===== Load associated data epoch =====
+    for iFile = 1:numel(sInputs)
+        % ===== Load Morlet TF file linked to the spike epoch =====
+        tfMat = in_bst(sInputs(iFile).FileName);
         dataMat = in_bst(tfMat.DataFile);
-        F = dataMat.F;                   % [nChannels x nSamples]
-        time = dataMat.Time(:)';         % use data time
 
-        nChannels = size(F,1);
-        nSamples  = size(F,2);
+        if ~isfield(tfMat, 'TF') || isempty(tfMat.TF)
+            bst_report('Warning', sProcess, sInputs(iFile), 'Skipping file: TF matrix is empty.');
+            OutputFiles{iFile} = sInputs(iFile).FileName;
+            continue;
+        end
+        if ~isfield(dataMat, 'F') || isempty(dataMat.F)
+            bst_report('Warning', sProcess, sInputs(iFile), 'Skipping file: data matrix is empty.');
+            OutputFiles{iFile} = sInputs(iFile).FileName;
+            continue;
+        end
 
-        % ===== Matrices like in original code =====
-        EoI = zeros(nChannels, nSamples);
-        HFO = zeros(nChannels, nSamples);
+        % Expected TF layout: [nChannels x nFreq x nTime]
+        morletTF = tfMat.TF;
+        F = dataMat.F;
+        timeData = dataMat.Time(:)';
+        Fs = 1 / mean(diff(timeData));
+
+        nChannels = size(F, 1);
+        nSamples  = size(F, 2);
 
         % ===== Block 2: Determine EoI =====
-        for i = 1:nChannels
-            channel = F(i,:);
-            EoI(i,:) = determineEoI(channel, time);
+        EoI = zeros(nChannels, nSamples);
+        for iCh = 1:nChannels
+            EoI(iCh, :) = determineEoI(F(iCh, :), timeData);
         end
 
-        % ===== Block 3: Determine HFO from EoI (needs TF map per channel) =====
-        HFOrow = zeros(1, nSamples);
-        for j = 1:nChannels
-            time_frequency_map2 = squeeze(morletTF(j,:,:));   % [nFreq x nTime]
-            EoIrow = EoI(j,:);
-            channel = F(j,:);
-            HFOrow = determineHFOfromEoI(channel, EoIrow, Fs, time, HFOrow, time_frequency_map2);
-            HFO(j,:) = HFOrow;
+        % ===== Block 3: Determine HFO from EoI =====
+        HFO = zeros(nChannels, nSamples);
+        for iCh = 1:nChannels
+            tfMap = squeeze(morletTF(iCh, :, :));
+            tfMap = abs(tfMap);
+            tfMap = matchTfToDataLength(tfMap, nSamples);
+
             HFOrow = zeros(1, nSamples);
+            HFO(iCh, :) = determineHFOfromEoI(F(iCh, :), EoI(iCh, :), Fs, timeData, HFOrow, tfMap);
         end
 
-        % ===== Block 4: GFP spike region (using F as "FNormal") =====
-        [~, minimum_index, ~, min_after_spike] = computeGFPandSpikeRegion(F, time);
+        % ===== Block 4: Compute GFP and spike region =====
+        [~, minimum_index, ~, min_after_spike] = computeGFPandSpikeRegion(F, timeData);
 
-        % ===== Determine HFO in spike region and create events =====
-        detTimes = [];
-        detCh    = [];
-        for i = 1:nChannels
-            [~, yes_HFO, start_HFO, end_HFO] = determineHFOinSpikeRegion(HFO(i,:), time, minimum_index, min_after_spike);
-            if yes_HFO == 1 && start_HFO ~= 0 && end_HFO ~= 0
-                detTimes(end+1,:) = [start_HFO, end_HFO]; %#ok<AGROW>
-                detCh(end+1,1)    = i;                  %#ok<AGROW>
+        % ===== Keep only HFOs inside the spike region =====
+        detTimes = zeros(0, 2);
+        detCh = zeros(0, 1);
+
+        for iCh = 1:nChannels
+            [~, yes_HFO, start_HFO, end_HFO] = determineHFOinSpikeRegion(HFO(iCh, :), timeData, minimum_index, min_after_spike);
+            if (yes_HFO == 1) && (start_HFO ~= 0) && (end_HFO ~= 0)
+                detTimes(end+1, :) = [start_HFO, end_HFO]; %#ok<AGROW>
+                detCh(end+1, 1) = iCh; %#ok<AGROW>
             end
         end
 
-        % ===== Add events to dataMat (minimal) =====
-        if ~isfield(dataMat, 'Events') || isempty(dataMat.Events)
-            dataMat.Events = repmat(struct('label',[],'color',[],'epochs',[],'times',[],'samples',[],'reactTimes',[],'select',[],'channels',[],'notes',[]), 0);
-        end
-
-        % find/create event
-        iEvt = [];
-        for k = 1:numel(dataMat.Events)
-            if strcmpi(dataMat.Events(k).label, evtName)
-                iEvt = k;
-                break;
-            end
-        end
-        if isempty(iEvt)
-            iEvt = numel(dataMat.Events) + 1;
-            dataMat.Events(iEvt).label  = evtName;
-            dataMat.Events(iEvt).epochs = [];
-            dataMat.Events(iEvt).times  = [];
-            dataMat.Events(iEvt).samples = [];
-            dataMat.Events(iEvt).channels = [];
-            dataMat.Events(iEvt).select = 1;
-        end
-
+        % ===== Add/append Brainstorm event =====
         if ~isempty(detTimes)
-            t = detTimes';                       % [2 x nEvents]
-            dataMat.Events(iEvt).epochs   = [dataMat.Events(iEvt).epochs, ones(1,size(detTimes,1))];
-            dataMat.Events(iEvt).times    = [dataMat.Events(iEvt).times, t];
-            dataMat.Events(iEvt).samples  = [dataMat.Events(iEvt).samples, round(t .* Fs)];
-            dataMat.Events(iEvt).channels = [dataMat.Events(iEvt).channels, detCh(:)'];
+            dataMat = appendExtendedEvent(dataMat, evtName, detTimes, detCh, Fs);
+            bst_save(file_fullpath(tfMat.DataFile), dataMat, 'v6');
         end
 
-        % Save updated data epoch
-        bst_save(file_fullpath(tfMat.DataFile), dataMat, 'v6');
-
-        % Output: unchanged timefreq file (pipeline-friendly)
-        OutputFiles{f} = sInputs(f).FileName;
+        % Output is unchanged TF file (pipeline friendly)
+        OutputFiles{iFile} = sInputs(iFile).FileName;
     end
 end
 
+
+%% ===== LOCAL HELPERS =====
+function addCoreFunctionsToPath()
+    thisFile = mfilename('fullpath');
+    thisDir = fileparts(thisFile);
+    coreDir = fullfile(thisDir, 'epilepsy_code');
+    if exist(coreDir, 'dir') == 7
+        addpath(coreDir);
+    end
+end
+
+function tfMapOut = matchTfToDataLength(tfMapIn, nSamples)
+    nTfTime = size(tfMapIn, 2);
+    if nTfTime == nSamples
+        tfMapOut = tfMapIn;
+    elseif nTfTime > nSamples
+        tfMapOut = tfMapIn(:, 1:nSamples);
+    else
+        tfMapOut = [tfMapIn, repmat(tfMapIn(:, end), 1, nSamples - nTfTime)];
+    end
+end
+
+function dataMat = appendExtendedEvent(dataMat, evtName, detTimes, detCh, Fs)
+    if ~isfield(dataMat, 'Events') || isempty(dataMat.Events)
+        dataMat.Events = repmat(struct( ...
+            'label', [], 'color', [], 'epochs', [], 'times', [], 'samples', [], ...
+            'reactTimes', [], 'select', [], 'channels', [], 'notes', []), 0);
+    end
+
+    iEvt = [];
+    for i = 1:numel(dataMat.Events)
+        if strcmpi(dataMat.Events(i).label, evtName)
+            iEvt = i;
+            break;
+        end
+    end
+
+    if isempty(iEvt)
+        iEvt = numel(dataMat.Events) + 1;
+        dataMat.Events(iEvt).label = evtName;
+        dataMat.Events(iEvt).color = [1, 0, 0];
+        dataMat.Events(iEvt).epochs = [];
+        dataMat.Events(iEvt).times = [];
+        dataMat.Events(iEvt).samples = [];
+        dataMat.Events(iEvt).reactTimes = [];
+        dataMat.Events(iEvt).select = 1;
+        dataMat.Events(iEvt).channels = [];
+        dataMat.Events(iEvt).notes = [];
+    end
+
+    t = detTimes';
+    nDet = size(detTimes, 1);
+
+    dataMat.Events(iEvt).epochs = [dataMat.Events(iEvt).epochs, ones(1, nDet)];
+    dataMat.Events(iEvt).times = [dataMat.Events(iEvt).times, t];
+    dataMat.Events(iEvt).samples = [dataMat.Events(iEvt).samples, round(t .* Fs)];
+
+    % Keep channels as numeric indices (one per detected interval), consistent with detection output.
+    dataMat.Events(iEvt).channels = [dataMat.Events(iEvt).channels, detCh(:)'];
+end
