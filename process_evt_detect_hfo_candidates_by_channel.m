@@ -1,4 +1,4 @@
-function varargout =process_evt_detect_hfo_candidates_by_channel( varargin )
+function varargout = process_evt_detect_hfo_candidates_by_channel( varargin )
 % PROCESS_EVT_DETECT_ECG: Detect heartbeats in a continuous file, and create set of events called "cardiac"
 
 % @=============================================================================
@@ -99,21 +99,23 @@ end
 function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
     OutputFiles = cell(1, numel(sInputs));
 
-    prefix     = strtrim(sProcess.options.prefix.Value);
-    if isempty(prefix), prefix = 'HFOcand'; end
+    prefix = strtrim(sProcess.options.prefix.Value);
+    if isempty(prefix)
+        prefix = 'HFOcand';
+    end
 
-    kMad       = sProcess.options.kmad.Value{1};
-    kOffRatio  = sProcess.options.koff.Value{1};
-    minDurMs   = sProcess.options.mindur.Value{1};
-    mergeMs    = sProcess.options.mergegap.Value{1};
-    minCycles  = sProcess.options.mincycles.Value{1};
-    fHighAss   = sProcess.options.fhigh.Value{1};
-    maxZCFact  = sProcess.options.maxzcfactor.Value{1};
+    kMad        = sProcess.options.kmad.Value{1};
+    kOffRatio   = sProcess.options.koff.Value{1};
+    minDurMs    = sProcess.options.mindur.Value{1};
+    mergeMs     = sProcess.options.mergegap.Value{1};
+    minCycles   = sProcess.options.mincycles.Value{1};
+    fHighAss    = sProcess.options.fhigh.Value{1};
+    maxZCFact   = sProcess.options.maxzcfactor.Value{1};
     isOverwrite = sProcess.options.overwrite.Value;
 
     % Time window
     TimeWindow = [];
-    if isfield(sProcess.options,'timewindow') && iscell(sProcess.options.timewindow.Value) && ~isempty(sProcess.options.timewindow.Value)
+    if isfield(sProcess.options, 'timewindow') && iscell(sProcess.options.timewindow.Value) && ~isempty(sProcess.options.timewindow.Value)
         TimeWindow = sProcess.options.timewindow.Value{1};
     end
 
@@ -149,15 +151,19 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                 continue;
             end
 
-            F    = double(F);        % [nChan x nTime]
-            Time = double(Time(:)'); % [1 x nTime]
+            F    = double(F);         % [nChan x nTime]
+            Time = double(Time(:)');  % [1 x nTime]
             Fs   = 1 / (Time(2) - Time(1));
 
             % Apply time window if provided
             if ~isempty(TimeWindow)
                 i1 = bst_closest(TimeWindow(1), Time);
                 i2 = bst_closest(TimeWindow(2), Time);
-                if i2 < i1, tmp = i1; i1 = i2; i2 = tmp; end
+                if i2 < i1
+                    tmp = i1;
+                    i1 = i2;
+                    i2 = tmp;
+                end
                 F = F(:, i1:i2);
                 Time = Time(i1:i2);
                 if numel(Time) < 2
@@ -167,17 +173,20 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                 end
             end
 
-            minDurSmp = max(1, round((minDurMs/1000) * Fs));
-            mergeSmp  = max(0, round((mergeMs/1000)  * Fs));
+            minDurSmp = max(1, round((minDurMs / 1000) * Fs));
+            mergeSmp  = max(0, round((mergeMs  / 1000) * Fs));
+
+            % ===== NEW: collect BAD intervals once for this file =====
+            badTimes = get_bad_intervals(sFile.events);
 
             % Ensure events exist
-            if ~isfield(sFile,'events') || isempty(sFile.events)
+            if ~isfield(sFile, 'events') || isempty(sFile.events)
                 sFile.events = repmat(db_template('event'), 0);
             end
 
             % Process each channel and create an event label per channel
-            for ii = 1:size(F,1)
-                x = F(ii,:);
+            for ii = 1:size(F, 1)
+                x = F(ii, :);
 
                 % Hilbert envelope
                 env = abs(hilbert(x));
@@ -198,9 +207,9 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                 % Merge close segments
                 [segStart, segEnd] = merge_segments_samples(segStart, segEnd, mergeSmp);
 
-                % Filter by min duration + ZC min/max
-                keepStart = zeros(1,0);
-                keepEnd   = zeros(1,0);
+                % Filter by min duration + ZC min/max + BAD overlap
+                keepStart = zeros(1, 0);
+                keepEnd   = zeros(1, 0);
 
                 for k = 1:numel(segStart)
                     s1 = segStart(k);
@@ -222,10 +231,17 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
 
                     dur = (s2 - s1 + 1) / Fs;
                     maxZC = floor(2 * fHighAss * dur * maxZCFact);
-                    if maxZC < 2*minCycles
-                        maxZC = 2*minCycles;
+                    if maxZC < 2 * minCycles
+                        maxZC = 2 * minCycles;
                     end
                     if zc > maxZC
+                        continue;
+                    end
+
+                    % ===== NEW: discard if overlapping any BAD segment =====
+                    evtStart = Time(s1);
+                    evtEnd   = Time(s2);
+                    if overlaps_bad(evtStart, evtEnd, badTimes)
                         continue;
                     end
 
@@ -266,10 +282,10 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                 end
 
                 % Assign events (extended)
-                sEvent.times  = [sEvent.times, evtTimes];
-                sEvent.epochs = [sEvent.epochs, ones(1, size(evtTimes,2))];
+                sEvent.times    = [sEvent.times, evtTimes];
+                sEvent.epochs   = [sEvent.epochs, ones(1, size(evtTimes, 2))];
                 sEvent.channels = [];
-                sEvent.notes = [];
+                sEvent.notes    = [];
 
                 sFile.events(iEvt) = sEvent;
             end
@@ -296,8 +312,8 @@ end
 %% ===== LOCAL HELPERS =====
 function [starts, ends] = find_segments_hysteresis(x, thr_on, thr_off)
     n = numel(x);
-    starts = zeros(1,0);
-    ends   = zeros(1,0);
+    starts = zeros(1, 0);
+    ends   = zeros(1, 0);
 
     inSeg = false;
     s0 = 1;
@@ -312,7 +328,7 @@ function [starts, ends] = find_segments_hysteresis(x, thr_on, thr_off)
             if x(i) < thr_off
                 inSeg = false;
                 starts(end+1) = s0; %#ok<AGROW>
-                ends(end+1)   = i-1; %#ok<AGROW>
+                ends(end+1)   = i - 1; %#ok<AGROW>
             end
         end
     end
@@ -322,6 +338,7 @@ function [starts, ends] = find_segments_hysteresis(x, thr_on, thr_off)
         ends(end+1)   = n;  %#ok<AGROW>
     end
 end
+
 
 function [starts, ends] = merge_segments_samples(starts, ends, mergeGapSmp)
     if isempty(starts)
@@ -343,6 +360,7 @@ function [starts, ends] = merge_segments_samples(starts, ends, mergeGapSmp)
     ends   = eOut;
 end
 
+
 function s = sanitize_label(name)
     % Replace non-alphanumeric with underscore, avoid empty labels
     s = regexprep(name, '[^A-Za-z0-9]', '_');
@@ -351,4 +369,50 @@ function s = sanitize_label(name)
     if isempty(s)
         s = 'Chan';
     end
+end
+
+
+function badTimes = get_bad_intervals(events)
+    badTimes = zeros(2, 0);
+
+    if isempty(events)
+        return;
+    end
+
+    labels = {events.label};
+    iBad = find(~cellfun('isempty', regexpi(labels, 'BAD')));
+
+    for i = iBad
+        if ~isfield(events(i), 'times') || isempty(events(i).times)
+            continue;
+        end
+
+        t = events(i).times;
+
+        % Convert simple events to zero-length extended intervals if needed
+        if size(t, 1) == 1
+            t = [t; t];
+        elseif size(t, 1) ~= 2
+            continue;
+        end
+
+        t = sort(t, 1);
+        badTimes = [badTimes, t]; %#ok<AGROW>
+    end
+
+    if ~isempty(badTimes)
+        [~, ord] = sort(badTimes(1, :));
+        badTimes = badTimes(:, ord);
+    end
+end
+
+
+function tf = overlaps_bad(t1, t2, badTimes)
+    if isempty(badTimes)
+        tf = false;
+        return;
+    end
+
+    inter = min(t2, badTimes(2, :)) - max(t1, badTimes(1, :));
+    tf = any(inter > 0);   % strict overlap only
 end
