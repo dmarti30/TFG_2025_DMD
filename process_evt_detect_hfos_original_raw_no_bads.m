@@ -1,4 +1,4 @@
-function varargout = process_evt_detect_hfos_original_raw_no_bads(varargin)
+function varargout = process_evt_detect_hfos_from_raw_to_raw(varargin)
 % PROCESS_EVT_DETECT_HFOS_FROM_RAW_TO_RAW:
 % Starting from the ORIGINAL raw file:
 %   1) Apply notch filter in memory: 50,100,150,200 Hz
@@ -11,6 +11,8 @@ function varargout = process_evt_detect_hfos_original_raw_no_bads(varargin)
 %   - The HFO detection logic below is intentionally preserved from the
 %     original process_evt_detect_hfos_without_bad.
 %   - The only addition is the preprocessing stage before detection.
+%   - FINAL CHANGE: merge gap is now also applied GLOBALLY across channels
+%     before saving the final event list.
 
 eval(macro_method);
 end
@@ -21,7 +23,7 @@ function sProcess = GetDescription() %#ok<DEFNU>
     sProcess.Comment     = 'Detect HFO from original RAW (notch+band, save on original)';
     sProcess.Category    = 'Custom';
     sProcess.SubGroup    = 'Events';
-    sProcess.Index       = 54;
+    sProcess.Index       = 56;
 
     sProcess.InputTypes  = {'raw'};
     sProcess.OutputTypes = {'raw'};
@@ -121,9 +123,9 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
     maxZCFact   = sProcess.options.maxzcfactor.Value{1};
     isOverwrite = sProcess.options.overwrite.Value;
 
-    NotchFreqs  = sProcess.options.notchfreqs.Value{1};
-    HighPassHz  = sProcess.options.highpass.Value{1};
-    LowPassHz   = sProcess.options.lowpass.Value{1};
+    NotchFreqs   = sProcess.options.notchfreqs.Value{1};
+    HighPassHz   = sProcess.options.highpass.Value{1};
+    LowPassHz    = sProcess.options.lowpass.Value{1};
     KeepFiltered = sProcess.options.keepfiltered.Value;
 
     % Time window
@@ -191,12 +193,9 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
             end
 
             % 2) Band-pass
-            % Supported external call documented by Brainstorm:
-            % process_bandpass('Compute', x, Fs, HighPass, LowPass, 'bst-hfilter', isMirror, isRelax)
             Ffilt = process_bandpass('Compute', Ffilt, Fs, HighPassHz, LowPassHz, 'bst-hfilter', 0, 0);
 
             % ===== OPTIONAL: SAVE FILTERED FILES IN DATABASE =====
-            % This does NOT affect the detector or where events are written.
             if KeepFiltered
                 try
                     sRawIn = {sInputs(iFile).FileName};
@@ -255,7 +254,7 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                 % Candidate segments using hysteresis
                 [segStart, segEnd] = find_segments_hysteresis(env, thr_on, thr_off);
 
-                % Merge close segments
+                % Merge close segments WITHIN CHANNEL (unchanged)
                 [segStart, segEnd] = merge_segments_samples(segStart, segEnd, mergeSmp);
 
                 % Filter by min duration + ZC min/max + BAD overlap
@@ -297,6 +296,11 @@ function OutputFiles = Run(sProcess, sInputs) %#ok<DEFNU>
                     allEnd(end+1)   = s2; %#ok<AGROW>
                     allNote{end+1}  = sprintf('ch=%s', chanNames{iChanList(ii)}); %#ok<AGROW>
                 end
+            end
+
+            % ===== NEW: APPLY GLOBAL MERGE ACROSS CHANNELS =====
+            if ~isempty(allStart)
+                [allStart, allEnd, allNote] = merge_segments_global_across_channels(allStart, allEnd, allNote, mergeSmp);
             end
 
             % Ensure events array exists on ORIGINAL raw
@@ -471,4 +475,76 @@ function tf = overlaps_bad(t1, t2, badTimes)
 
     inter = min(t2, badTimes(2,:)) - max(t1, badTimes(1,:));
     tf = any(inter > 0);  % strict overlap only
+end
+
+
+function [starts, ends, notes] = merge_segments_global_across_channels(starts, ends, notes, mergeGapSmp)
+    if isempty(starts)
+        return;
+    end
+
+    % Sort all detections by start time, then by end time
+    X = [starts(:), ends(:)];
+    [~, ord] = sortrows(X, [1 2]);
+
+    starts = starts(ord);
+    ends   = ends(ord);
+    notes  = notes(ord);
+
+    mStart = starts(1);
+    mEnd   = ends(1);
+    mNotes = {notes{1}};
+
+    for k = 2:numel(starts)
+        if (starts(k) - mEnd(end)) <= mergeGapSmp
+            % Merge globally, regardless of channel
+            mEnd(end) = max(mEnd(end), ends(k));
+            mNotes{end} = merge_channel_notes(mNotes{end}, notes{k});
+        else
+            mStart(end+1) = starts(k); %#ok<AGROW>
+            mEnd(end+1)   = ends(k);   %#ok<AGROW>
+            mNotes{end+1} = notes{k};  %#ok<AGROW>
+        end
+    end
+
+    starts = mStart;
+    ends   = mEnd;
+    notes  = mNotes;
+end
+
+
+function outNote = merge_channel_notes(noteA, noteB)
+    % note format expected: 'ch=F8' or already merged: 'ch=F8,F7,IZ'
+    chansA = parse_channels_from_note(noteA);
+    chansB = parse_channels_from_note(noteB);
+
+    allChans = [chansA, chansB];
+    allChans = unique(allChans, 'stable');
+
+    outNote = ['ch=' strjoin(allChans, ',')];
+end
+
+
+function chans = parse_channels_from_note(noteStr)
+    chans = {};
+
+    if isempty(noteStr)
+        return;
+    end
+
+    tok = regexp(noteStr, '^ch=(.*)$', 'tokens', 'once');
+    if isempty(tok)
+        chans = {noteStr};
+        return;
+    end
+
+    raw = tok{1};
+    if isempty(raw)
+        chans = {};
+        return;
+    end
+
+    splitCh = strsplit(raw, ',');
+    splitCh = splitCh(~cellfun(@isempty, splitCh));
+    chans = splitCh;
 end
