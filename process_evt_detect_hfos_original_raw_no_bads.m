@@ -1,4 +1,4 @@
-function varargout = process_evt_detect_hfos_from_raw_to_raw(varargin)
+function varargout = process_evt_detect_hfos_original_raw_no_bads(varargin)
 % PROCESS_EVT_DETECT_HFOS_FROM_RAW_TO_RAW:
 % Starting from the ORIGINAL raw file:
 %   1) Apply notch filter in memory: 50,100,150,200 Hz
